@@ -572,16 +572,18 @@ function step() {
     const tx = x+dx, ty = y+dy;
     if (tx < 0 || tx >= GRID_W || ty < 0 || ty >= GRID_H) continue;
     const target = grid[ty][tx];
-    // Build group: pusher itself + sticky group of whatever is in front
-    // The pusher always tries to move forward; if something is in front, push it too
-    const group = new Set([x+','+y]);
+
+    // Start group from the pusher itself, pulling in everything sticky-connected to it
+    // (sides, back, etc.) so they all travel together.
+    const group = getStickyGroup(x, y);
+
+    // Also pull in whatever block/group is directly in front (the thing being pushed).
     if (target) {
       const frontGroup = getStickyGroup(tx, ty);
       for (const k of frontGroup) group.add(k);
     }
-    // If nothing in front, pusher just moves freely into empty space
-    // If something is there but immovable, pusher is blocked
-    const moved = tryMoveGroup(group, dx, dy);
+
+    tryMoveGroup(group, dx, dy);
   }
   
   // 5. Re-update power states after movement
