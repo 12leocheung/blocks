@@ -244,6 +244,13 @@ const BLOCK_DEFS = {
     movable: true,
     powered: false,
   },
+  rotator: {
+    name: "Rotator",
+    desc: "Rotates 90° every tick and spins all adjacent blocks (N/E/S/W) by 90° each tick.",
+    sprite: "rotator",
+    movable: true,
+    powered: false,
+  },
 };
 
 const GRID_W = 40;
@@ -267,8 +274,45 @@ for (const [name, src] of Object.entries(SPRITES)) {
   spriteImgs[name] = img;
 }
 
+// Generate rotator sprite (no aseprite file, draw it)
+(function() {
+  const c = document.createElement('canvas');
+  c.width = 64; c.height = 64;
+  const cx = c.getContext('2d');
+  // Background
+  cx.fillStyle = '#3a2060';
+  cx.fillRect(0, 0, 64, 64);
+  // Border
+  cx.strokeStyle = '#9f60ff';
+  cx.lineWidth = 3;
+  cx.strokeRect(2, 2, 60, 60);
+  // Circular arrow
+  cx.strokeStyle = '#cc88ff';
+  cx.lineWidth = 5;
+  cx.lineCap = 'round';
+  cx.beginPath();
+  cx.arc(32, 32, 18, -Math.PI*0.1, Math.PI*1.6);
+  cx.stroke();
+  // Arrowhead
+  cx.fillStyle = '#cc88ff';
+  cx.save();
+  const ax = 32 + 18 * Math.cos(Math.PI*1.6);
+  const ay = 32 + 18 * Math.sin(Math.PI*1.6);
+  cx.translate(ax, ay);
+  cx.rotate(Math.PI*1.6 + Math.PI/2);
+  cx.beginPath();
+  cx.moveTo(0, -8); cx.lineTo(5, 4); cx.lineTo(-5, 4);
+  cx.closePath(); cx.fill();
+  cx.restore();
+  SPRITES['rotator'] = c.toDataURL();
+  // Also register it in spriteImgs after sprites load
+  const rotImg = new Image();
+  rotImg.src = SPRITES['rotator'];
+  spriteImgs['rotator'] = rotImg;
+})();
+
 // ---- TOOLBAR SETUP ----
-const TOOL_ORDER = ['block','solid','destroyer','duper','pusher','sticky','power','logic','light'];
+const TOOL_ORDER = ['block','solid','destroyer','duper','pusher','sticky','power','logic','light','rotator'];
 
 function buildToolbar() {
   const container = document.getElementById('block-tools');
@@ -448,7 +492,8 @@ function isMovable(x, y) {
   const cell = grid[y][x];
   if (!cell) return true; // empty = movable
   if (cell.type === 'solid') return false;
-  if (cell.type === 'logic') return isPoweredAt(x, y); // check live power state
+  // Use cached _powered so logic state is based on pre-move snapshot
+  if (cell.type === 'logic') return cell._powered === true;
   return true;
 }
 
@@ -457,13 +502,23 @@ function step() {
   document.getElementById('tick-count').textContent = tickCount;
   document.getElementById('step-num').textContent = tickCount;
   
-  // 1. Update power states for logic/light
+  // 1. Update power states for logic/light (snapshot before any movement)
   for (let y = 0; y < GRID_H; y++) {
     for (let x = 0; x < GRID_W; x++) {
       const cell = grid[y][x];
       if (!cell) continue;
       if (cell.type === 'logic' || cell.type === 'light') {
         cell._powered = isPoweredAt(x, y);
+      }
+    }
+  }
+  // Build a snapshot of logic power states keyed by position for stable push checks
+  const logicPowerSnapshot = new Map();
+  for (let y = 0; y < GRID_H; y++) {
+    for (let x = 0; x < GRID_W; x++) {
+      const cell = grid[y][x];
+      if (cell && cell.type === 'logic') {
+        logicPowerSnapshot.set(x+','+y, cell._powered);
       }
     }
   }
@@ -550,7 +605,11 @@ function step() {
         if (!blocker) continue;
         // If the blocker is truly immovable, leave it — tryMoveGroup will fail below.
         // If it can be physically displaced (not solid, not off-logic), absorb it.
-        if (blocker.type !== 'solid' && !(blocker.type === 'logic' && !isPoweredAt(tx, ty))) {
+        // Use snapshot for logic: powered=movable, unpowered=immovable wall
+        const blockerPowered = blocker.type === 'logic' 
+          ? (logicPowerSnapshot.get(tx+','+ty) || false)
+          : true;
+        if (blocker.type !== 'solid' && !(blocker.type === 'logic' && !blockerPowered)) {
           const extra = getStickyGroup(tx, ty);
           for (const k of extra) {
             if (!cells.has(k)) { cells.add(k); changed = true; }
@@ -564,7 +623,15 @@ function step() {
       const tx = cx+dx, ty = cy+dy;
       if (tx < 0 || tx >= GRID_W || ty < 0 || ty >= GRID_H) return false;
       if (cells.has(tx+','+ty)) continue; // moving into another cell in group
-      if (!isMovable(tx, ty)) return false;
+      // Use snapshot for logic immovability during push resolution
+      const destCell = grid[ty][tx];
+      if (destCell) {
+        if (destCell.type === 'solid') return false;
+        if (destCell.type === 'logic') {
+          const powered = logicPowerSnapshot.get(tx+','+ty) || false;
+          if (!powered) return false;
+        }
+      }
     }
     // Perform move
     const moved = [];
@@ -609,7 +676,25 @@ function step() {
     tryMoveGroup(group, dx, dy);
   }
   
-  // 5. Re-update power states after movement
+  // 5. Rotator: spin self and rotate adjacent blocks' dir by 90° each tick
+  const DIRS_CW = { right: 'down', down: 'left', left: 'up', up: 'right' };
+  for (let y = 0; y < GRID_H; y++) {
+    for (let x = 0; x < GRID_W; x++) {
+      const cell = grid[y][x];
+      if (!cell || cell.type !== 'rotator') continue;
+      // Rotate the rotator itself
+      cell.dir = DIRS_CW[cell.dir || 'right'];
+      // Rotate adjacent blocks' facing direction
+      for (const {nx, ny} of getNeighbors(x, y)) {
+        const neighbor = grid[ny][nx];
+        if (neighbor) {
+          neighbor.dir = DIRS_CW[neighbor.dir || 'right'];
+        }
+      }
+    }
+  }
+
+  // 6. Re-update power states after movement
   for (let y = 0; y < GRID_H; y++) {
     for (let x = 0; x < GRID_W; x++) {
       const cell = grid[y][x];
