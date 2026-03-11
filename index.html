@@ -535,7 +535,30 @@ function step() {
   }
   
   function tryMoveGroup(cells, dx, dy) {
-    // Check if all target cells are movable
+    // Expand group: if a cell in the group would collide with a block that can be
+    // physically displaced (not solid, not off-logic), pull it into the group too.
+    // Repeat until stable (chain pushing).
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const key of [...cells]) {
+        const [cx, cy] = key.split(',').map(Number);
+        const tx = cx+dx, ty = cy+dy;
+        if (tx < 0 || tx >= GRID_W || ty < 0 || ty >= GRID_H) continue;
+        if (cells.has(tx+','+ty)) continue;
+        const blocker = grid[ty][tx];
+        if (!blocker) continue;
+        // If the blocker is truly immovable, leave it — tryMoveGroup will fail below.
+        // If it can be physically displaced (not solid, not off-logic), absorb it.
+        if (blocker.type !== 'solid' && !(blocker.type === 'logic' && !isPoweredAt(tx, ty))) {
+          const extra = getStickyGroup(tx, ty);
+          for (const k of extra) {
+            if (!cells.has(k)) { cells.add(k); changed = true; }
+          }
+        }
+      }
+    }
+    // Now check all target positions are clear (empty or already in group)
     for (const key of cells) {
       const [cx, cy] = key.split(',').map(Number);
       const tx = cx+dx, ty = cy+dy;
