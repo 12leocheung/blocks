@@ -251,6 +251,13 @@ const BLOCK_DEFS = {
     movable: true,
     powered: false,
   },
+  slime: {
+    name: "Slime",
+    desc: "Overrides all movement — nothing can push or move through it. Blocks also cannot be rotated while touching slime.",
+    sprite: "slime",
+    movable: false,
+    powered: false,
+  },
 };
 
 const GRID_W = 40;
@@ -305,14 +312,45 @@ for (const [name, src] of Object.entries(SPRITES)) {
   cx.closePath(); cx.fill();
   cx.restore();
   SPRITES['rotator'] = c.toDataURL();
-  // Also register it in spriteImgs after sprites load
   const rotImg = new Image();
   rotImg.src = SPRITES['rotator'];
   spriteImgs['rotator'] = rotImg;
+
+  // Slime sprite
+  const sc = document.createElement('canvas');
+  sc.width = 64; sc.height = 64;
+  const sx = sc.getContext('2d');
+  sx.fillStyle = '#1a3d1a';
+  sx.fillRect(0, 0, 64, 64);
+  sx.strokeStyle = '#3aff3a';
+  sx.lineWidth = 3;
+  sx.strokeRect(2, 2, 60, 60);
+  // Blobby fill
+  sx.fillStyle = '#2aaa2a';
+  sx.beginPath();
+  sx.ellipse(32, 32, 22, 20, 0, 0, Math.PI*2);
+  sx.fill();
+  sx.fillStyle = '#3aff3a';
+  sx.beginPath();
+  sx.ellipse(32, 32, 22, 20, 0, 0, Math.PI*2);
+  sx.stroke();
+  // Shine
+  sx.fillStyle = 'rgba(180,255,180,0.35)';
+  sx.beginPath();
+  sx.ellipse(26, 24, 8, 6, -0.5, 0, Math.PI*2);
+  sx.fill();
+  // Drips
+  sx.fillStyle = '#2aaa2a';
+  sx.beginPath(); sx.ellipse(20, 50, 4, 6, 0, 0, Math.PI*2); sx.fill();
+  sx.beginPath(); sx.ellipse(44, 52, 3, 5, 0.3, 0, Math.PI*2); sx.fill();
+  SPRITES['slime'] = sc.toDataURL();
+  const slimeImg = new Image();
+  slimeImg.src = SPRITES['slime'];
+  spriteImgs['slime'] = slimeImg;
 })();
 
 // ---- TOOLBAR SETUP ----
-const TOOL_ORDER = ['block','solid','destroyer','duper','pusher','sticky','power','logic','light','rotator'];
+const TOOL_ORDER = ['block','solid','destroyer','duper','pusher','sticky','power','logic','light','rotator','slime'];
 
 function buildToolbar() {
   const container = document.getElementById('block-tools');
@@ -378,7 +416,8 @@ function placeBlock(x, y) {
   }
   const def = BLOCK_DEFS[selectedTool];
   if (!def) return;
-  const cell = { type: selectedTool, dir: 'right' };
+  // Logic blocks default to unpowered (immovable) until simulation confirms power
+  const cell = { type: selectedTool, dir: 'right', _powered: false };
   grid[y][x] = cell;
 }
 
@@ -492,9 +531,14 @@ function isMovable(x, y) {
   const cell = grid[y][x];
   if (!cell) return true; // empty = movable
   if (cell.type === 'solid') return false;
+  if (cell.type === 'slime') return false; // slime overrides all movement
   // Use cached _powered so logic state is based on pre-move snapshot
   if (cell.type === 'logic') return cell._powered === true;
   return true;
+}
+
+function adjacentToSlime(x, y) {
+  return getNeighbors(x, y).some(({nx, ny}) => grid[ny][nx] && grid[ny][nx].type === 'slime');
 }
 
 function step() {
@@ -609,7 +653,7 @@ function step() {
         const blockerPowered = blocker.type === 'logic' 
           ? (logicPowerSnapshot.get(tx+','+ty) || false)
           : true;
-        if (blocker.type !== 'solid' && !(blocker.type === 'logic' && !blockerPowered)) {
+        if (blocker.type !== 'solid' && blocker.type !== 'slime' && !(blocker.type === 'logic' && !blockerPowered)) {
           const extra = getStickyGroup(tx, ty);
           for (const k of extra) {
             if (!cells.has(k)) { cells.add(k); changed = true; }
@@ -627,6 +671,7 @@ function step() {
       const destCell = grid[ty][tx];
       if (destCell) {
         if (destCell.type === 'solid') return false;
+        if (destCell.type === 'slime') return false;
         if (destCell.type === 'logic') {
           const powered = logicPowerSnapshot.get(tx+','+ty) || false;
           if (!powered) return false;
@@ -667,8 +712,9 @@ function step() {
     // (sides, back, etc.) so they all travel together.
     const group = getStickyGroup(x, y);
 
-    // Also pull in whatever block/group is directly in front (the thing being pushed).
-    if (target) {
+    // Also pull in whatever block/group is directly in front (the thing being pushed),
+    // but only if it's actually movable — don't absorb immovable logic blocks.
+    if (target && isMovable(tx, ty)) {
       const frontGroup = getStickyGroup(tx, ty);
       for (const k of frontGroup) group.add(k);
     }
@@ -684,10 +730,10 @@ function step() {
       if (!cell || cell.type !== 'rotator') continue;
       // Rotate the rotator itself
       cell.dir = DIRS_CW[cell.dir || 'right'];
-      // Rotate adjacent blocks' facing direction
+      // Rotate adjacent blocks — skip slime (immune) and skip blocks touching slime
       for (const {nx, ny} of getNeighbors(x, y)) {
         const neighbor = grid[ny][nx];
-        if (neighbor) {
+        if (neighbor && neighbor.type !== 'slime' && !adjacentToSlime(nx, ny)) {
           neighbor.dir = DIRS_CW[neighbor.dir || 'right'];
         }
       }
