@@ -246,7 +246,7 @@ const BLOCK_DEFS = {
   },
   rotator: {
     name: "Rotator",
-    desc: "Rotates 90° every tick and spins all adjacent blocks (N/E/S/W) by 90° each tick.",
+    desc: "Rotates 90° every tick and spins adjacent blocks. Sticky neighbors physically orbit around it. Right-click to toggle CW ↻ / CCW ↺ spin direction (CCW shown with blue tint).",
     sprite: "rotator",
     movable: true,
     powered: false,
@@ -426,11 +426,16 @@ canvas.addEventListener('mousedown', e => {
   const c = getCell(e);
   if (!c) return;
   lastCell = c;
-  // Right click on any block: cycle rotation
+  // Right click: rotator toggles CW/CCW spin; other blocks cycle facing direction
   if (e.button === 2 && grid[c.y][c.x]) {
-    const dirs = ['right','down','left','up'];
-    const cur = grid[c.y][c.x].dir || 'right';
-    grid[c.y][c.x].dir = dirs[(dirs.indexOf(cur)+1)%4];
+    const cell = grid[c.y][c.x];
+    if (cell.type === 'rotator') {
+      cell._ccw = !cell._ccw;
+    } else {
+      const dirs = ['right','down','left','up'];
+      const cur = cell.dir || 'right';
+      cell.dir = dirs[(dirs.indexOf(cur)+1)%4];
+    }
     draw();
     return;
   }
@@ -490,16 +495,28 @@ function drawCell(cell, x, y) {
   
   // All blocks support rotation via right-click
   const deg = PUSHER_DIR_DEG[cell.dir || 'right'];
-  if (deg !== 0) {
+  // Rotator: flip horizontally when CCW to show arrow direction
+  const flipX = (cell.type === 'rotator' && cell._ccw) ? -1 : 1;
+  if (deg !== 0 || flipX === -1) {
     ctx.save();
     ctx.translate(x*CELL + CELL/2, y*CELL + CELL/2);
-    ctx.rotate((deg * Math.PI) / 180);
+    if (deg !== 0) ctx.rotate((deg * Math.PI) / 180);
+    ctx.scale(flipX, 1);
     if (img && img.complete) ctx.drawImage(img, -CELL/2, -CELL/2, CELL, CELL);
     ctx.restore();
   } else {
     if (img && img.complete) ctx.drawImage(img, x*CELL, y*CELL, CELL, CELL);
   }
   
+  // Rotator CCW indicator — tint it blue-ish when spinning CCW
+  if (cell.type === 'rotator' && cell._ccw) {
+    ctx.save();
+    ctx.globalAlpha = 0.35;
+    ctx.fillStyle = '#4488ff';
+    ctx.fillRect(x*CELL, y*CELL, CELL, CELL);
+    ctx.restore();
+  }
+
   // Light glow effect
   if (cell.type === 'light' && cell._powered) {
     ctx.save();
@@ -722,19 +739,79 @@ function step() {
     tryMoveGroup(group, dx, dy);
   }
   
-  // 5. Rotator: spin self and rotate adjacent blocks' dir by 90° each tick
-  const DIRS_CW = { right: 'down', down: 'left', left: 'up', up: 'right' };
+  // 5. Rotator: spin self, rotate adjacent block dirs, and orbit sticky neighbors
+  const DIRS_CW  = { right: 'down',  down: 'left',  left: 'up',   up: 'right' };
+  const DIRS_CCW = { right: 'up',    up: 'left',    left: 'down', down: 'right' };
+  // Orbit offsets: for each current neighbor position (dx,dy) -> next position (nx,ny) CW
+  // CW orbit: right->down->left->up->right  i.e. (1,0)->(0,1)->(-1,0)->(0,-1)->(1,0)
+  function orbitCW(dx, dy)  { return [-dy,  dx]; }
+  function orbitCCW(dx, dy) { return [ dy, -dx]; }
+
   for (let y = 0; y < GRID_H; y++) {
     for (let x = 0; x < GRID_W; x++) {
       const cell = grid[y][x];
       if (!cell || cell.type !== 'rotator') continue;
-      // Rotate the rotator itself
-      cell.dir = DIRS_CW[cell.dir || 'right'];
-      // Rotate adjacent blocks — skip slime (immune) and skip blocks touching slime
+      const ccw = cell._ccw || false;
+      const DIRS_SPIN = ccw ? DIRS_CCW : DIRS_CW;
+
+      // Rotate the rotator's own facing dir
+      cell.dir = DIRS_SPIN[cell.dir || 'right'];
+
+      // Find sticky neighbors and collect their full connected groups to orbit together
+      const orbitCells = new Map(); // key -> {cell, ox, oy} relative to rotator
+      for (const {nx, ny} of getNeighbors(x, y)) {
+        const n = grid[ny][nx];
+        if (n && n.type === 'sticky' && !adjacentToSlime(nx, ny)) {
+          // Flood-fill the entire sticky-connected cluster (excluding the rotator itself)
+          const visited = new Set();
+          const queue = [{cx: nx, cy: ny}];
+          while (queue.length) {
+            const {cx, cy} = queue.shift();
+            const k = cx+','+cy;
+            if (visited.has(k)) continue;
+            if (cx === x && cy === y) continue; // don't include rotator
+            const c2 = grid[cy][cx];
+            if (!c2) continue;
+            if (adjacentToSlime(cx, cy)) continue;
+            visited.add(k);
+            orbitCells.set(k, {cell: c2, ox: cx - x, oy: cy - y});
+            // Expand through sticky connections
+            if (c2.type === 'sticky') {
+              for (const {nx: nx2, ny: ny2} of getNeighbors(cx, cy)) {
+                const n2 = grid[ny2][nx2];
+                if (n2 && !visited.has(nx2+','+ny2)) queue.push({cx: nx2, cy: ny2});
+              }
+            } else {
+              // Non-sticky block: only include if directly adjacent to a sticky
+              // (already queued via sticky expansion, so just mark visited)
+            }
+          }
+        }
+      }
+
+      // Orbit the collected group around the rotator
+      if (orbitCells.size > 0) {
+        // Clear old positions
+        for (const [k] of orbitCells) {
+          const [cx, cy] = k.split(',').map(Number);
+          grid[cy][cx] = null;
+        }
+        // Place at new orbited positions, rotating each block's facing dir
+        for (const [, {cell: sCell, ox, oy}] of orbitCells) {
+          const [nox, noy] = ccw ? orbitCCW(ox, oy) : orbitCW(ox, oy);
+          const nx = x + nox, ny = y + noy;
+          if (nx >= 0 && nx < GRID_W && ny >= 0 && ny < GRID_H) {
+            grid[ny][nx] = sCell;
+            sCell.dir = DIRS_SPIN[sCell.dir || 'right'];
+          }
+        }
+      }
+
+      // Rotate facing dir of non-sticky adjacent blocks (skip slime and slime-adjacent)
       for (const {nx, ny} of getNeighbors(x, y)) {
         const neighbor = grid[ny][nx];
-        if (neighbor && neighbor.type !== 'slime' && !adjacentToSlime(nx, ny)) {
-          neighbor.dir = DIRS_CW[neighbor.dir || 'right'];
+        if (neighbor && neighbor.type !== 'sticky' && neighbor.type !== 'slime' && !adjacentToSlime(nx, ny)) {
+          neighbor.dir = DIRS_SPIN[neighbor.dir || 'right'];
         }
       }
     }
